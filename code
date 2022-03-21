@@ -1,0 +1,149 @@
+import numpy as np
+
+# -*- coding:UTF-8 -*-
+import pandas as pd
+import pymysql
+import cx_Oracle
+from sqlalchemy import create_engine
+import os
+import datetime
+import sys
+import matplotlib.pyplot as plt
+from datetime import date, timedelta
+from numba import jit
+
+'''  UTF-8 encoding '''
+os.environ["NLS_LANG"] = ".AL32UTF8"
+
+def daterange(start_date, end_date):
+    for n in range(int((end_date - start_date).days)):
+        yield start_date + timedelta(n)
+
+
+start_date = date(2021, 2, 1)
+end_date = date(2021, 2, 3)
+
+
+engine= create_engine('mysql+pymysql://id:pw@localhost/table_name?charset=utf8', encoding='utf-8')
+connection = engine.connect()
+nn = pd.read_sql("select AREA_ID, ITEM_NM from PROTOCOL_SPEC where SYS_ID = 102 and DATA_TYPE_ID = 1 and SEQ_SUB_ID != 0 and ITEM_NM not like '%%V%%' group by 2", connection)
+connection.close()
+
+
+def progress(nn):
+    for n in range(len(nn)):
+        area = nn['AREA_ID'][n]
+        name = nn['ITEM_NM'][n]
+        yield area, name
+
+
+# 성능을 빠르게 하고자 jit적용하려 했지만, type error로 추후 최적화 예정
+# @jit(nopython = True) 
+# @jit(forceobj=True)
+
+# 반복되는 부분 하나로 정리할것 
+def test(date):
+    sdate = date.strftime("%Y%m%d000000000")
+    edate = (date + timedelta(days=1)).strftime("%Y%m%d000000000")
+    print(sdate, edate)
+
+
+    for item in progress(nn):
+        area = item[0]
+        name = item[1]
+        engine= create_engine('mysql+pymysql://root:admin@192.168.111.143:3306/sn001_phm?charset=utf8', encoding='utf-8')
+        connection = engine.connect()
+
+        m_test = pd.read_sql("select * from value_tlds where area_id = '%s' and dev_nm like '%s' and date(dtct_ts) >= '%s' and date(dtct_ts) < '%s'" % (area, name,sdate, edate),   connection)
+
+        connection.close()
+        table = m_test[['AREA_ID', 'DEV_GUBUN', 'DEV_NM','DTCT_TS','MAJOR_TX_VOLT','MAJOR_TX_VOLT_STATE','MINR_TX_VOLT','MINR_TX_VOLT_STATE','MAJOR_RX_VOLT','MAJOR_RX_VOLT_STATE','MINR_RX_VOLT','MINR_RX_VOLT_STATE']]
+
+        table=table.set_index('DTCT_TS')
+
+        df_summary = pd.DataFrame()
+        df_summary['MAJOR_TX_VOLT_MIN'] = table['MAJOR_TX_VOLT'].resample('1H').min()
+        df_summary['MAJOR_TX_VOLT_MAX'] = table['MAJOR_TX_VOLT'].resample('1H').max()
+        df_summary['MAJOR_TX_VOLT_AVG'] = table['MAJOR_TX_VOLT'].resample('1H').mean().round(2)
+        df_summary['MAJOR_TX_VOLT_VAR'] = table['MAJOR_TX_VOLT'].resample('1H').var().round(2)
+        df_summary['MAJOR_TX_VOLT_STD'] = np.sqrt(table['MAJOR_TX_VOLT'].resample('1H').var()).round(2)
+
+        df_summary['MINR_TX_VOLT_MIN'] = table['MINR_TX_VOLT'].resample('1H').min()
+        df_summary['MINR_TX_VOLT_MAX'] = table['MINR_TX_VOLT'].resample('1H').max()
+        df_summary['MINR_TX_VOLT_AVG'] = table['MINR_TX_VOLT'].resample('1H').mean().round(2)
+        df_summary['MINR_TX_VOLT_VAR'] = table['MINR_TX_VOLT'].resample('1H').var().round(2)
+        df_summary['MINR_TX_VOLT_STD'] = np.sqrt(table['MINR_TX_VOLT'].resample('1H').var()).round(2)
+
+        df_summary['MAJOR_RX_VOLT_MIN'] = table['MAJOR_RX_VOLT'].resample('1H').min()
+        df_summary['MAJOR_RX_VOLT_MAX'] = table['MAJOR_RX_VOLT'].resample('1H').max()
+        df_summary['MAJOR_RX_VOLT_AVG'] = table['MAJOR_RX_VOLT'].resample('1H').mean().round(2)
+        df_summary['MAJOR_RX_VOLT_VAR'] = table['MAJOR_RX_VOLT'].resample('1H').var().round(2)
+        df_summary['MAJOR_RX_VOLT_STD'] = np.sqrt(table['MAJOR_RX_VOLT'].resample('1H').var()).round(2)
+
+        df_summary['MINR_RX_VOLT_MIN'] = table['MINR_RX_VOLT'].resample('1H').min()
+        df_summary['MINR_RX_VOLT_MAX'] = table['MINR_RX_VOLT'].resample('1H').max()
+        df_summary['MINR_RX_VOLT_AVG'] = table['MINR_RX_VOLT'].resample('1H').mean().round(2)
+        df_summary['MINR_RX_VOLT_VAR'] = table['MINR_RX_VOLT'].resample('1H').var().round(2)
+        df_summary['MINR_RX_VOLT_STD'] = np.sqrt(table['MINR_RX_VOLT'].resample('1H').var()).round(2)
+
+        df_summary['AREA_ID'] = table['AREA_ID'].iloc[0]
+        df_summary['DEV_GUBUN'] = table['DEV_GUBUN'].iloc[0]
+        df_summary['DEV_NM'] = table['DEV_NM'].iloc[0]
+
+        a = table.MAJOR_TX_VOLT_STATE != '300_001'
+        table_test1=table.loc[a,:]
+
+        table_test2 = pd.DataFrame()
+        table_test2['MAJOR_TX_VOLT_ERROR'] = table_test1['MAJOR_TX_VOLT_STATE'].resample('1H').count()
+
+        merge_outer = df_summary.join(table_test2, how='outer')
+        merge_outer = merge_outer.astype({'MAJOR_TX_VOLT_ERROR':'object'})
+        merge_outer["MAJOR_TX_VOLT_ERROR"] = merge_outer.MAJOR_TX_VOLT_ERROR.fillna(0)
+        merge_outer = merge_outer.astype({'MAJOR_TX_VOLT_ERROR':'int'})
+
+        b = table.MAJOR_RX_VOLT_STATE != '300_001'
+        table_testb=table.loc[b,:]
+
+        table_testbb = pd.DataFrame()
+        table_testbb['MAJOR_RX_VOLT_ERROR'] = table_testb['MAJOR_RX_VOLT_STATE'].resample('1H').count()
+
+        merge_outer2 = merge_outer.join(table_testbb, how='outer')
+        merge_outer2 = merge_outer2.astype({'MAJOR_RX_VOLT_ERROR':'object'})
+        merge_outer2["MAJOR_RX_VOLT_ERROR"] = merge_outer2.MAJOR_RX_VOLT_ERROR.fillna(0)
+        merge_outer2 = merge_outer2.astype({'MAJOR_RX_VOLT_ERROR':'int'})
+
+
+        c = table.MINR_TX_VOLT_STATE != '300_001'
+        table_testc=table.loc[c,:]
+
+        table_test3 = pd.DataFrame()
+        table_test3['MINR_TX_VOLT_ERROR'] = table_testc['MINR_TX_VOLT_STATE'].resample('1H').count()
+
+        merge_outer3 = merge_outer2.join(table_test3, how='outer')
+        merge_outer3 = merge_outer3.astype({'MINR_TX_VOLT_ERROR':'object'})
+        merge_outer3["MINR_TX_VOLT_ERROR"] = merge_outer3.MINR_TX_VOLT_ERROR.fillna(0)
+        merge_outer3 = merge_outer3.astype({'MINR_TX_VOLT_ERROR':'int'})
+
+        d = table.MINR_RX_VOLT_STATE != '300_001'
+        table_testd=table.loc[d,:]
+
+        table_testdd = pd.DataFrame()
+        table_testdd['MINR_RX_VOLT_ERROR'] = table_testd['MINR_RX_VOLT_STATE'].resample('1H').count()
+
+        merge_outer4 = merge_outer3.join(table_testdd, how='outer')
+        merge_outer4 = merge_outer4.astype({'MINR_RX_VOLT_ERROR':'object'})
+        merge_outer4["MINR_RX_VOLT_ERROR"] = merge_outer4.MINR_RX_VOLT_ERROR.fillna(0)
+        merge_outer4 = merge_outer4.astype({'MINR_RX_VOLT_ERROR':'int'})
+
+        merge_outer4['DTCT_TS'] = merge_outer4.index
+
+
+        local_mariasql_url = create_engine('mysql+pymysql://id:pw@localhost/table_name?charset=utf8',encoding='utf-8')
+        merge_outer4.to_sql(name='new_tlds_test2', con=local_mariasql_url, index=False, if_exists='append')
+        print(item, '==========  end =========')
+
+        connection.close()
+    
+
+for single_date in daterange(start_date, end_date):
+     test(single_date)
